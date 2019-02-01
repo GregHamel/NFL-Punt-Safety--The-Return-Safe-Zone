@@ -1,0 +1,676 @@
+{
+  "cells": [
+    {
+      "metadata": {
+        "_uuid": "7f373b40d581618f44f6ee60300af1fa6f2a81a0"
+      },
+      "cell_type": "markdown",
+      "source": "# Introduction"
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "7bf798727586b3874cea6b667527ce5aec6f2be4"
+      },
+      "cell_type": "markdown",
+      "source": "The National Football League is America's most popular sports league, comprised of 32 teams that play 16 games apiece over the course of a season for a chance to compete in the NFL Playoffs. The NFL Playoffs are a single-elimination tournament of the league's top 12 teams from the regular season, culminating in the Super Bowl, the final championship game. According to Nielsen Media Research, the 2017 Super Bowl drew over 110 million TV viewers and generated over 190 million social media interactions,[$^{1}$](#ref1) making it the world's largest annual sporting event.\n\nThe NFL is known for its athletic, physical play style, where heavily padded players clash with the offense attempting to advance the football toward an end zone and the defense attempting to tackle a ball-carrier to prevent his advance. Gritty physical play is a hallmark of the NFL and one of the reasons for its popularity, but it can also lead to injuries. According to ESPN, there were 281 reported concussions during the NFL preseason and regular season (including practices) in 2017, which was the highest recorded number of concussions since the NFL began sharing concussion data in 2012.[$^{2}$](#ref2) \n\nThe NFL is committed to promoting player safety. Over the past several seasons, the NFL has made several changes to kickoff rules to address the disproportionately high incidence of concussions on kickoff plays. As a part of its ongoing health and safety efforts, the NFL has tasked the Kaggle community to perform data analysis with the end goal of making rule recommendations to reduce concussions on punt plays. \n\nIn this notebook, I will present my analysis of the data provided by the NFL to reveal which play features are strongly associated with concussions, as well as proposals for specific rule modifications informed by the analysis and my knowledge of football as a long-time fan and former player. The goal of this project is to propose rule changes that will increase punt play safety, while working within the confines of the existing rules so that changes are minimally invasive and maintain the excitement and integrity of the game."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "ecf06d74aca71ee89fca9476c6925680283b8334"
+      },
+      "cell_type": "code",
+      "source": "# Loading libraries\n\nlibrary(tidyverse)  # Data manipulation\nlibrary(data.table) # Fast data reading\nlibrary(lubridate) # Dealing with dates\nlibrary(plotly) # Interactive plotting\nlibrary(IRdisplay) # Displaying HTML in notebooks\nlibrary(repr) # Setting plot sizes\n\noptions(warn=-1) # Suppress warnings\n\n#list.files(path = \"../input\")",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "db902ca6b18ecdd3de790f5310c0b2f64d8f1f64"
+      },
+      "cell_type": "code",
+      "source": "# Loading all provided punt data other than NGS\ngame_data <- read_csv(\"../input/NFL-Punt-Analytics-Competition/game_data.csv\")\nplay_information <- read_csv(\"../input/NFL-Punt-Analytics-Competition/play_information.csv\")\nplayer_role_data <- read_csv(\"../input/NFL-Punt-Analytics-Competition/play_player_role_data.csv\")\nplayer_punt_data <- read_csv(\"../input/NFL-Punt-Analytics-Competition/player_punt_data.csv\")\ninjury_data <- read_csv(\"../input/NFL-Punt-Analytics-Competition/video_review.csv\")\nvideo_footage <- read_csv(\"../input/NFL-Punt-Analytics-Competition/video_footage-injury.csv\")\ncontrol_footage <- read_csv(\"../input/NFL-Punt-Analytics-Competition/video_footage-control.csv\")\n\n# Extra aggregate punt data from ESPN\nespn2016 <- read_csv(\"../input/espnpunts20162017/espn2016.csv\")\nespn2017 <- read_csv(\"../input/espnpunts20162017/espn2017.csv\")\n\n# Some players have multiple entries in the player data table\n# Collapse player punt data to one record (and possibly multiple listed numbers/positions) per player\nplayer_punt_data <- player_punt_data %>% \n                    group_by (GSISID) %>% \n                    summarize(Number = paste(Number, collapse=\", \"),\n                              Position = paste(Position, collapse=\", \"))\n\n# Joining injury data with play descriptions\ninjury_play_info <- injury_data %>% \n                    left_join(play_information, by = c(\"GameKey\", \"PlayID\", \"Season_Year\"))\n\n# Joining injury data with player number and position data\ninjury_play_info <- injury_play_info %>% \n                    left_join(player_punt_data, by = c(\"GSISID\"))\n\n# Joining injury data with player punt role data\ninjury_play_info <- injury_play_info %>% \n                    left_join(player_role_data, by = c(\"GameKey\", \"PlayID\", \"Season_Year\",\"GSISID\"))\n\n# Joining in primary injury partner player number and position\ninjury_play_info$Primary_Partner_GSISID <- as.numeric(injury_play_info$Primary_Partner_GSISID)\ninjury_play_info <- injury_play_info %>% \n                    left_join(player_punt_data, by = c(\"Primary_Partner_GSISID\" = \"GSISID\") )\n\n# Joining in primary injury partner player punt role data\ninjury_play_info <- injury_play_info %>% \n                    left_join(player_role_data, by = c(\"GameKey\", \"PlayID\", \"Season_Year\", \n                                                       \"Primary_Partner_GSISID\" = \"GSISID\"))\n\n# Rename duplicated columns\ninjury_play_info <- injury_play_info %>% \n                    rename(player_number = Number.x,  \n                           player_position = Position.x, \n                           player_role = Role.x, \n                           partner_number = Number.y , \n                           partner_position = Position.y , \n                           partner_role = Role.y)\n\n# Joining in game-level data\ninjury_play_info <- injury_play_info %>% \n                    left_join(game_data, by = c('GameKey', 'Season_Year',\n                                                'Season_Type', 'Week')) %>% \n                    rename(Game_Date = Game_Date.x)\n\n# Remove duplicated date column\ninjury_play_info$Game_Date.y = NULL\n\n# Add a column for unique game key, play_id pair\ninjury_play_info$game_play_id <- paste(injury_play_info$GameKey, injury_play_info$PlayID, sep=\"_\" )\n\n# Create a vector of named video preview links\nvideo_footage_keys <- paste(video_footage$gamekey, video_footage$playid, sep=\"_\" )\nvideo_footage <- video_footage[[\"PREVIEW LINK (5000K)\"]]\nnames(video_footage) <- video_footage_keys",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "fbbba9cd06934b42c9295b802bea0d6617987553"
+      },
+      "cell_type": "markdown",
+      "source": "## How Punts Work and Current Punt Rules"
+    },
+    {
+      "metadata": {
+        "_uuid": "fb5827d9d804b5a0cb9e2fb501735e5b97fd8e37"
+      },
+      "cell_type": "markdown",
+      "source": "To analyze punt data and make rule recommendations, it is vital to understand the subject of the analysis: punt plays and the rules that govern them. In a punt play, a kicking team transfers possession of the football to the receiving team, with the goal of setting back the receiving team as far away as possible from the end zone they need to reach to score. After the ball is kicked, a player on the receiving team may catch the ball and then advance it until he is tackled. If the receiving team does not wish to return the ball, the receiver may indicate a “fair catch” by waving his hand and then the ball is downed after the catch at the spot of the catch. Alternatively, if the ball is not caught or picked up by a receiver, it is downed wherever it comes to rest.\n\nThe following videos from the provided data set show a punt play with a return and another with a fair catch:"
+    },
+    {
+      "metadata": {
+        "_kg_hide-output": false,
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "496e0c7551c1bb67af5d1e63b9a788c702610d9e"
+      },
+      "cell_type": "code",
+      "source": "# Displays two punt plays. The first has a return, the second is a fair catch\n\ndisplay_html(paste(\n'<div>\n<video width=\"400\" height=\"280\" controls=\"\" style=\"margin-left:0px; vertical-align: top\">\n<source src=\"', video_footage[1], '\" type=\"video/mp4\"></video>\n<video width=\"400\" height=\"280\" controls=\"\" style=\"margin-left:0px; vertical-align: top\">\n<source src=\"', video_footage[14], '\" type=\"video/mp4\"></video></div>', sep=\"\"))\n",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "d281585f4f05323e0d768bf656a0ee86243fd58b"
+      },
+      "cell_type": "markdown",
+      "source": "The rules that govern punts are covered in the [official NFL rule book](https://operations.nfl.com/media/3277/2018-nfl-rulebook_final-version.pdf) in Rule 9 entitled “SCRIMMAGE KICK” and Rule 10 entitled “OPPORTUNITY TO CATCH A KICK, FAIR CATCH.” The sections start on pages 36 and 40 respectively.\n\nIn brief,  Rule 9 lays out the core rules that govern punt plays, including how the ball can be kicked, touched and returned. Rule 9, Section 1, Articles 2 and 3 are of particular interest as they govern “KICKING TEAM PLAYERS ON LINE DURING KICK” and “DEFENSIVE TEAM FORMATION” respectively. The changes the NFL made to kickoff rules in 2018 largely dealt with player formations, so these are potential areas for rule modifications.\n\nRule 10 lays out core rules that govern fair catches. Rule 10, Section 1, Article 1 entitled “INTERFERENCE” is of particular interest as it lays out rules aimed at giving the receiver adequate time to catch a kick without being touched or impeded by the kicking team, regardless of whether he signals for a fair catch. These three Articles seem most promising as potential areas for rule improvement to increase safety."
+    },
+    {
+      "metadata": {
+        "_uuid": "d200748f6eccfc7882f64dfdbe3cbc0a6c2f6b38"
+      },
+      "cell_type": "markdown",
+      "source": "# Punt Video Review"
+    },
+    {
+      "metadata": {
+        "_uuid": "201dccb0562fa577b73b4bc28de6fba9c11d5abe"
+      },
+      "cell_type": "markdown",
+      "source": "Before digging into the data, I will take a moment to review the video footage of concussion-causing punt plays and note key observations. I've embedded all 37 videos below. Click \"output\" if you would like the view the videos."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "acae964fd413d171b9a5f8351ddd0dbb402f8d6b"
+      },
+      "cell_type": "code",
+      "source": "iter <- 1\n\n# Loop through and display all injury videos\nfor (play in names(video_footage)){\n    \ndesc <- injury_play_info %>%   # Extract data for a given play\n    filter(game_play_id==play)\n\n# Print summary of injured player, partner and play description\ndesc <- paste(\"Video\", iter, \":\", \"Game Play ID\", desc$game_play_id, \"--Number\", desc$player_number, \"playing\", desc$player_role, \"injured by number\", desc$partner_number, \n              \"playing\", desc$partner_role, \"--\", desc$PlayDescription)\n\n# Display play video\ndisplay_html(paste('<div style=\"word-wrap: break-word; width: 800px\">', desc, '\n<video width=\"800\" height=\"450\" controls=\"\" style=\"margin-left:0px; vertical-align: top\">\n<source src=\"', video_footage[play], '\" type=\"video/mp4\"></video>\n</div>' , sep= \"\"))\n    \niter <- iter+1\n}",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "f7165f024e4c18f8ce3aa264b2abebce36f1a1a9"
+      },
+      "cell_type": "markdown",
+      "source": "The video footage contains a variety of punt plays including a fake punt (video 17) a punt return for a touchdown (video 24) and a muffed reception (video 12). The videos contain only one successful fair catch (video 14) and one other attempted fair catch (video 30). By contrast, the 37 control videos without injuries contain 11 fair catches, suggesting injuries are unlikely to occur on punts that result in a fair catch."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "c56502cd096147f357aa2cb8743f81436a62f555",
+        "_kg_hide-input": true,
+        "_kg_hide-output": true
+      },
+      "cell_type": "code",
+      "source": "# Count Fair Catches in \"control\" footage data set\ngrepl(\"fair catch\", control_footage[[\"PlayDescription\"]]) %>% sum()\n\n# Combined 2016 and 2017 fair catch rate\n(sum(espn2016$FC)+sum(espn2017$FC))/(sum(espn2016$PUNTS)+sum(espn2017$PUNTS))\n\n# Chances of seeing 1 fair catch or fewer with 37 punts at 27% fair catch rate\npbinom(1, size = 37, p = 0.27)",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "157207bc17962e6f4f458e06e0a92422501984b7"
+      },
+      "cell_type": "markdown",
+      "source": "To get a better sense of the overall fair catch rate in football, I've uploaded aggregate punt records available on ESPN for the 2016[$^{3}$](#ref3)  and 2017[$^{4}$](#ref4)  regular seasons. The aggregate punt data shows that the fair catch rate was 27% across both seasons. If we assume a 27% fair catch rate, the chances of seeing one fair catch or less out of 37 punt plays due to chance is 0.01%. (See code and output above.). This is strong evidence in support of what may seem intuitively obvious: that punt plays that result in fair catches tend to be relatively safe."
+    },
+    {
+      "metadata": {
+        "_uuid": "4950d363e1719a4663983e302d6654b02c4d8546"
+      },
+      "cell_type": "markdown",
+      "source": "# Punt Meta Data Exploration and Analysis"
+    },
+    {
+      "metadata": {
+        "_uuid": "78af017e360df322677149633f9cf73c82335e13"
+      },
+      "cell_type": "markdown",
+      "source": "I will begin my data analysis by investigating the punt data other than the \"Next Gen Stats\" data. Click \"Output\" below if you'd like to see the structure of the data."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "45fa2682ff994a0528c1f31d5da4fbd4ca591ed6",
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "scrolled": true
+      },
+      "cell_type": "code",
+      "source": "# Display data dimensions\ndims <- dim(injury_play_info) %>% data.frame() %>% t()\ncolnames(dims) <- c(\"Observations\", \"Features\")\ndims\n\n# Show the variables other than PlayDescription\nt <- injury_play_info[,c(1:20,22:41)] %>% t()\nt[ ,1:4]\n\n# Display a few lines of PlayDescription separately\ninjury_play_info[\"PlayDescription\"] %>% head(4)\n",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "fa2e37d25c68c30ccc319a95e0a751a30d666ad8"
+      },
+      "cell_type": "markdown",
+      "source": "The injury data includes 37 observations with 41 variables. Although 37 is large number of concussions in terms of player safety in the real world--ideally that number would be zero--it is a small number in terms of data analysis. With \"only\" 37 observations to work with, only large differences in concussion rates across features may prove significant. Although there are 41 features, I will focus on those that are most relevant to the issue of safety.\n\nFirst, I will create a plot investigating concussions by player activity and team."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "4a24c4b1a9dd0cc1793dd79060abc8e4640373eb",
+        "_kg_hide-input": true
+      },
+      "cell_type": "code",
+      "source": "# Helper function to generate tables from feature names \n# (Mostly used for EDA prior to making this final notebook)\ngenerate_data_table <- function(feature, new_col_name, digits){\n    t <- table(injury_play_info[feature]) %>% \n        data.frame() %>% \n        rename(Concussions=Freq) %>% \n        mutate(Proportion = paste(round(Concussions/37 * 100, digits),\"%\", sep=\"\"))\n    colnames(t)[1] <- new_col_name\n    t\n}\n\n# Role lists for kicking team and recieving team\nkick_roles <- c(\"GL\", \"GR\", \"PLT\", \"PLG\", \"PLS\", \"PRG\", \n                \"PRT\",\"PLW\",\"PRW\",\"PC\",\"PPR\",\"P\")\n\nrecieve_roles <- c(\"VR\",\"VRo\", \"VRi\",\"VL\",\"VLi\",\"VLo\",\"PDR1\",\"PDR2\",\"PDR3\",\n                   \"PDL1\",\"PDL2\",\"PDL3\", \"PLR\",\"PLL\",\"PLM\",\"PFB\",\"PR\")\n\n# Add new feature denoting which team the player is on based on role\ninjury_play_info$player_team <- ifelse(injury_play_info$player_role %in% kick_roles,\n                                      \"Kicking\",\n                                      \"Recieving\")\n\n# Create and display plot\np1 <- injury_play_info %>% \ngroup_by(Player_Activity_Derived, player_team) %>% \nsummarize(Concussions = n(), \n          Proportion = paste(round(Concussions/37 * 100),\"%\", sep=\"\")) %>%\nggplot(aes(x=Player_Activity_Derived, y=Concussions, fill=player_team)) + \ngeom_col(alpha = 0.75) +\ngeom_text(aes(label = Proportion), position = position_stack(vjust = 0.5)) +\nscale_x_discrete(limits = rev(c(\"Tackling\",\"Blocked\",\"Blocking\",\"Tackled\")))+\nscale_fill_manual(values = c(\"salmon\", \"skyblue\")) +\ncoord_flip() +\ntheme(axis.title.y = element_blank(),\n    axis.ticks.y = element_blank(),\n    axis.text.y = element_text(size=12),\n    panel.grid.major = element_blank(),\n    panel.grid.minor = element_blank(),\n    panel.border = element_blank(),\n    panel.background = element_blank()) +\nlabs(title = \"Concussions by Player Activity\", \n     fill = \"Player Team\")\n\ngg1 <- ggplotly(p1)\n\nhtmlwidgets::saveWidget(gg1, \"gg1.html\")\ndisplay_html('<iframe src=\"gg1.html\" width=650 height=350 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "0fbd7b3ec91b016c8b873a42472485986d2790e5"
+      },
+      "cell_type": "code",
+      "source": "# Binomal distribuion with 37 trials and 0.5 probability of success\n# Chances of seeing 10 concussions or fewer on a given team assuming 37 occurred\npbinom(10, size = 37, p = 0.5) %>% round(5)\n\n# Sanity checking simulation. Should give similar result.\n# trials = 100000\n# results = c(1:trials)\n# for (t in 1:trials){\n# results[t] <- sum(round(runif(37)))\n# }                \n# sum(results <= 10)/trials",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "0784f19b80afe84bca10074ca8ff523a23fc60d6"
+      },
+      "cell_type": "markdown",
+      "source": "Players involved in activities associated with the kicking team--tackling and being blocked--were more likely to experience concussions. Overall, the kicking team suffered 27 concussions while the receiving team suffered 10. If the chances of a concussion occurring is assumed to be equally likely for both teams, a result this extreme would be expected to occur about 0.38% of the time (see hidden code and output above.). This suggests that there is a real difference in concussion rates for players on the kicking team versus the receiving team and perhaps counter-intuitively, it is more dangerous to be on the kicking team.\n\nTo investigate further, I will make a plot of concussions that occur due to friendly fire (players on the same team hurting one another.). This could provide insight into the higher incidence of injuries on the kicking team."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "6615300c0f0116d4442b8b1f48d39d05d1ed4723"
+      },
+      "cell_type": "code",
+      "source": "# Display table of concussions by friendly fire\n# generate_data_table(\"Friendly_Fire\", \"Friendly Fire\", 1)\n\n# Show how many friendly fire injuries occurred on each team\n# injury_play_info %>% \n#     filter(Friendly_Fire == \"Yes\") %>% \n#     select(player_team) %>% \n#     rename(Friendly_Fire_Team = player_team) %>%\n#     group_by(Friendly_Fire_Team) %>% \n#     summarize(Count = n())\n\n# Create and display plot of friendly fire\np3 <- injury_play_info %>% \ngroup_by(Friendly_Fire, player_team) %>% \nsummarize(Concussions = n(), \n          Proportion = paste(round(Concussions/37 * 100),\"%\", sep=\"\")) %>%\nggplot(aes(x=Friendly_Fire, y=Concussions, fill=player_team)) + \ngeom_col(alpha = 0.75) + \ngeom_text(aes(label = Proportion), position = position_stack(vjust = 0.5)) +\nscale_x_discrete(limits = rev(c(\"No\",\"Yes\",\"Unclear\")))+\nscale_fill_manual(values = c(\"salmon\", \"skyblue\")) +\ncoord_flip() +\ntheme(axis.title.y = element_blank(),\n    axis.ticks.y = element_blank(),\n    axis.text.y = element_text(size=12),\n    panel.grid.major = element_blank(),\n    panel.grid.minor = element_blank(),\n    panel.border = element_blank(),\n    panel.background = element_blank()) +\nlabs(fill = \"Player Team\") +\nggtitle(\"Concussions by Friendly Fire\")\n\ngg3 <- ggplotly(p3)\n\nhtmlwidgets::saveWidget(gg3, \"gg3.html\")\ndisplay_html('<iframe src=\"gg3.html\" width=650 height=350 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "0d96c55a509f16d1ec59b65d6b609146d466ad21"
+      },
+      "cell_type": "markdown",
+      "source": "Most concussions occur due to contact between players of opposing teams, but of the 6 friendly fire injuries, all 6 occurred on the kicking team. This makes intuitive sense, because on the kicking team, tacklers could hurt one another if they attempt to tackle the receiver at the same time.\n\nNext, I will create a plot investigating concussions by impact type, to see if the way players collide has a strong association with concussions."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "87fd6cabfad52282800d18f78fffc790ed63bf96",
+        "_kg_hide-input": true
+      },
+      "cell_type": "code",
+      "source": "# Display  table of concussions by impact type\n# generate_data_table(\"Primary_Impact_Type\", \"Impact Type\", 1)\n\n# Create and display plot\np2 <- injury_play_info %>% \ngroup_by(Primary_Impact_Type, player_team) %>% \nsummarize(Concussions = n(), \n          Proportion = paste(round(Concussions/37 * 100),\"%\", sep=\"\")) %>%\nggplot(aes(x=Primary_Impact_Type, y=Concussions, fill=player_team)) + \ngeom_col(alpha = 0.75) + \ngeom_text(aes(label = Proportion), position = position_stack(vjust = 0.5)) +\nscale_x_discrete(limits = rev(c(\"Helmet-to-body\",\"Helmet-to-helmet\",\"Helmet-to-ground\",\"Unclear\")))+\nscale_fill_manual(values = c(\"salmon\", \"skyblue\")) +\ncoord_flip() +\ntheme(axis.title.y = element_blank(),\n    axis.ticks.y = element_blank(),\n    axis.text.y = element_text(size=12),\n    panel.grid.major = element_blank(),\n    panel.grid.minor = element_blank(),\n    panel.border = element_blank(),\n    panel.background = element_blank()) +\nlabs(fill = \"Player Team\") +\nggtitle(\"Concussions by Impact Type\")\n\ngg2 <- ggplotly(p2)\n\nhtmlwidgets::saveWidget(gg2, \"gg2.html\")\ndisplay_html('<iframe src=\"gg2.html\" width=650 height=350 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "415cf76004ffbbb8c6d89d5bb4f721f873275ba7"
+      },
+      "cell_type": "markdown",
+      "source": "There is no discernible connection between impact type and concussions with an equal number coming from both helmet-to-helmet and helmet-to-body collisions and similar numbers occurring on both teams.\n\nI will proceed by checking whether concussions rates vary depending on whether the game was played in the preseason, regular season or postseason."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "dc5fa1abaf65bbfa6345b8853318c277f25a83a1",
+        "_kg_hide-input": true
+      },
+      "cell_type": "code",
+      "source": "# Display table of concussion rates by season type\nt <- generate_data_table(\"Season_Type\", \"Season Type\", 1)\nt$Games <- c(sum(game_data$Season_Type == \"Pre\"),\n                  sum(game_data$Season_Type == \"Reg\"))\n\nt[,1] <- as.character(t[,1]) # Convert col 1 to character\nt <- rbind(t, c(\"Post\", 0, \"0%\", 24)) # Add postseason data\n\nt$Punts <- c(sum(play_information$Season_Type == \"Pre\"),\n                  sum(play_information$Season_Type == \"Reg\"),\n                  sum(play_information$Season_Type == \"Post\"))\n\nt$Concussion_Rate <- paste(round(as.numeric(t$Concussions) / t$Punts, 4) * 100,\n                           \"%\", sep=\"\")\n\nt$Punts_Per_Game <- round(t$Punts/as.numeric(t$Games), 2)\n\nt$Concussion_Rate_Per_Game <- paste(round(as.numeric(t$Concussions) / as.numeric(t$Games), 4) * 100,\n                                     \"%\", sep=\"\")\nt",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "40357ed82a7b77153a72ef9fa6bbe1252addd760"
+      },
+      "cell_type": "code",
+      "source": "# Probability of seeing at least 12 of 37 concussions occur in the preaseason.\n\n# Assuming that concussion probability is the same in any given game\n# The probability of a given concussion occurring in a preseason game should be equal to\n# preseason_games/total_games\n\npbinom(11, 37, 130/nrow(game_data), lower.tail=FALSE) %>% round(5)\n\n# Sanity checking simulation. Should give similar result\n# trials = 100000\n# results = c(1:trials)\n# for (t in 1:trials){\n# results[t] <- sum(floor(runif(37, 1,45)) < 11)\n# }\n# sum(results >= 12)/trials\n\n# *Note: This assumes a similar number of games are played each week in the preseason and regular season",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "d174495f21a2ea9be8d5ed2e94e1dacb3433da72"
+      },
+      "cell_type": "markdown",
+      "source": "Although more total concussions occur in the regular season, the preseason has fewer total games played, giving it a higher concussion rate on both a per play and per game basis. Overall, the preseason had a concussion rate on punts of roughly 9% per game and 0.8% per play, while the regular season had a concussion rate of 5% per game and 0.5% per play. If we assume there is no difference between concussion rates and the number of punts per game in the preseason, regular season and postseason, we'd expect to see a difference this extreme about 4.4% of the time (see hidden code and output above.). This is not overwhelming evidence, but it does suggest that punt plays tend to be more dangerous in the preseason. It is not particularly surprising that no concussions were recorded in the postseason, since the data only includes 24 postseason games.\n\nAs a precursor to looking at player positions in the \"Next Gen Stats\" data, I will check whether the distance of a kick influences concussions.  Punt distance can be extracted from the play description variable."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "f20e51c68992749bab65895fe6173031bbee04a1"
+      },
+      "cell_type": "code",
+      "source": "# Set plot to desired display size\noptions(repr.plot.width=6, repr.plot.height=2.5)\n\n# Extract punt distance from play description and add as a new feature \n# (One play is a fake punt with no distance)\npos <- regexpr(\"punts [0-9]+ yards\", injury_play_info$PlayDescription)\npunt_distance <- substr(injury_play_info$PlayDescription, pos+5, pos+7)\npunt_distance[ pos == -1] <- NA\npunt_distance <- as.numeric(punt_distance)\ninjury_play_info$punt_distance <- punt_distance\n\n# Create a data frame of punt distances for dotplot\nt <- generate_data_table(\"punt_distance\", \"punt_distance\", 1) \nconcussion_vec <- rep(t$punt_distance, t$Concussions)\nconcussion_vec <- as.numeric(as.character(concussion_vec))\ndummy <- rep(1, length(concussion_vec))\nplot_frame <- data.frame(\"Punt_Distance\" = concussion_vec, Concussions = dummy)\n\n# Use constructed dataframe to generate and display dotplot\np2 <- plot_frame %>%\nggplot(aes(x = Punt_Distance, y = Concussions)) + \ngeom_dotplot(stackdir='center', binwidth = 2, dotsize=1, alpha = 0.85, fill=\"coral4\") +\ntheme(axis.title.y = element_blank(),\n    axis.ticks.y = element_blank(),\n    axis.text.y = element_blank(),\n    plot.title = element_text(hjust = 0.5)) +\nggtitle(\"Concussions by Punt Distance\") + xlab(\"Punt Distance\") + \ntheme(panel.background = element_rect(fill='palegreen4')) + \nscale_x_continuous(minor_breaks = NULL,\n     breaks= c(20,30,40,50,60,70), \n                   limit=c(20,70)) +\nscale_y_continuous(breaks = NULL)\n\np2",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "50dfcd7d81874e1f77f9664beddf4f8dde9b1a54"
+      },
+      "cell_type": "markdown",
+      "source": "Concussions are relatively evenly distributed across punts of varying distances.\n\nTo conclude the initial data exploration, I will investigate player role data to explore whether certain punt roles are more prone to injury than others. It should be noted that there are more possible roles on both the coverage and return sides than players on the field, so certain roles may be less common than others."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": false,
+        "trusted": true,
+        "_uuid": "7583e8ecfd0300c867f3769ace13cdf9b2a660f3"
+      },
+      "cell_type": "code",
+      "source": "# Set plot to desired display size\noptions(repr.plot.width=8, repr.plot.height=4)\n\n# Create vector of role: concussion number pairs\nt <- generate_data_table(\"player_role\", \"Player Role\",1)\nconcussion_pairs <- as.character(t$Concussions)\nnames(concussion_pairs) <- t[,1]\n\n\n# Role lists for kicking team and recieving team\nkick_roles <- c(\"GL\", \"GR\", \"PLT\", \"PLG\", \"PLS\", \"PRG\", \n                \"PRT\",\"PLW\",\"PRW\",\"PC\",\"PPR\",\"P\")\n\nrecieve_roles <- c(\"VR\",\"VRo\", \"VRi\",\"VLo\",\"VL\",\"VLi\",\"PDR1\",\"PDR2\",\"PDR3\",\n                   \"PDL1\",\"PDL2\",\"PDL3\", \"PLR\",\"PLM\",\"PLL\",\"PFB\",\"PR\")\n\n# Create data frame of x,y positions for each punt role\nkick_x <- c(55, 55, 55, 55, 55, 55, 55, 47, 47, 45, 41, 33)\nkick_y <- c(50, 4, 35, 31, 27, 23, 19, 36, 18, 27, 23, 27)\n\nrecieve_x <- c(55, 55, 55, 55, 55, 55, 54, 54, 54, 54, 54, 54, 63, 63, 63, 75, 85) + 11\nrecieve_y <- c(50, 54, 46, 0, 4, 8, 38, 34, 30, 18, 22, 26, 31, 27, 23, 30, 27)\n\nroles <- c(kick_roles, recieve_roles)\nconcussions <- concussion_pairs[roles]\nconcussions[is.na(concussions)] <- \"0\"\nroles <- paste(roles, concussions)\nx_pos <- c(kick_x, recieve_x)\ny_pos <- c(kick_y, recieve_y)\n\nrole_position_data <- data.frame(\"Role\" = roles, x = x_pos, y= y_pos, \n                                 team=c(rep(\"Kicking\",length(kick_x)), rep(\"Return\", length(recieve_x))))\n\n# Use contructed dataframe to create plot of role labels on a football field\nggplot(role_position_data, aes(x = x, y = y)) + \n            geom_label(aes(label=Role, fill=team), size = 3) + \n            theme(panel.background = element_rect(fill = 'palegreen4')) +\n            coord_cartesian(xlim = c(0,120), ylim = c(0, 53.3)) + \n            theme(legend.position=\"none\", axis.ticks.y=element_blank(), axis.ticks.x=element_blank(), \n            axis.text.y = element_blank(), axis.title.y=element_blank(), axis.title.x=element_blank(),\n            plot.title = element_text(hjust = 0.5, size=14)) +\n            scale_x_discrete(limits=seq(0,120,10), labels=c(\"\", \"  G\",\"10\",\"20\", \"30\", \"40\", \"50\",\"40\",\"30\",\"20\",\"10\", \"G  \", \"\")) +\n            annotate(geom=\"text\", x = 30, y = 45, label = \"Punt Coverage\", size=6) +\n            annotate(geom=\"text\", x = 90, y = 45, label = \"Punt Return\", size=6) +\n            geom_rect(xmin=-5, xmax=10, ymin=-2.7, ymax=56, color = NA, fill=\"steelblue\", alpha=0.5) + \n            geom_rect(xmin=110, xmax=125, ymin=-2.7, ymax=56, color = NA, fill=\"steelblue\", alpha=0.5) + \n            scale_fill_manual(values = c(\"salmon\", \"skyblue\")) +\n            scale_y_continuous(breaks = NULL) + ggtitle(\"Concussions Incurred by Punt Role\")",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "295632d54449f75195a1dad82fcf7a92e6d033e3"
+      },
+      "cell_type": "markdown",
+      "source": "On the kicking team, every player on or near the line of scrimmage had some risk of concussion. On the return side, the linemen and blockers were relatively safe, while the kick returner suffered 50% of return team concussions.\n\nI will repeat the same process for the player referred to in the data set as the \"primary partner\"--the other player involved in the collision. I will also refer to the primary partner as the injury partner and the player that caused the injury."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "19b183bc3f4db5a3fcc036ffd619a633efeb6dae",
+        "_kg_hide-input": true,
+        "_kg_hide-output": false
+      },
+      "cell_type": "code",
+      "source": "# Create vector of partner role: concussion number pairs\nt <- generate_data_table(\"partner_role\", \"Partner Role\",1)\nconcussion_pairs <- as.character(t$Concussions)\nnames(concussion_pairs) <- t[,1]\n\n# Remake the previous plot with the updated data\nroles <- c(kick_roles, recieve_roles)\nconcussions <- concussion_pairs[roles]\nconcussions[is.na(concussions)] <- \"0\"\nroles <- paste(roles, concussions)\nx_pos <- c(kick_x, recieve_x)\ny_pos <- c(kick_y, recieve_y)\n\nrole_position_data <- data.frame(\"Role\" = roles, x = x_pos, y= y_pos, \n                                 team=c(rep(\"Kicking\",length(kick_x)), rep(\"Return\", length(recieve_x))))\n\n# Use contructed dataframe to create plot of role labels on a football field\nggplot(role_position_data, aes(x = x, y = y)) + \n            geom_label(aes(label=Role, fill=team), size = 3) + \n            theme(panel.background = element_rect(fill = 'palegreen4')) +\n            coord_cartesian(xlim = c(0,120), ylim = c(0, 53.3)) + \n            theme(legend.position=\"none\", axis.ticks.y=element_blank(), axis.ticks.x=element_blank(), \n            axis.text.y = element_blank(), axis.title.y=element_blank(), axis.title.x=element_blank(),\n            plot.title = element_text(hjust = 0.5, size=14)) +\n            scale_x_discrete(limits=seq(0,120,10), labels=c(\"\", \"  G\",\"10\",\"20\", \"30\", \"40\", \"50\",\"40\",\"30\",\"20\",\"10\", \"G  \", \"\")) +\n            annotate(geom=\"text\", x = 30, y = 45, label = \"Punt Coverage\", size=6) +\n            annotate(geom=\"text\", x = 90, y = 45, label = \"Punt Return\", size=6) +\n            geom_rect(xmin=-5, xmax=10, ymin=-2.7, ymax=56, color = NA, fill=\"steelblue\", alpha=0.5) + \n            geom_rect(xmin=110, xmax=125, ymin=-2.7, ymax=56, color = NA, fill=\"steelblue\", alpha=0.5) + \n            scale_fill_manual(values = c(\"salmon\", \"skyblue\")) +\n            scale_y_continuous(breaks = NULL) + ggtitle(\"Concussions Caused by Punt Role\")",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "84f3b018fe50ce94c7d0e55c6f7955e202fdb3cf"
+      },
+      "cell_type": "code",
+      "source": "# Chances of a given role being involved in 13 or more of 37 concussion-causing plays\n# Assuming uniform chances for injury for each role and that each injury involes 1 player from both teams\n1 - pbinom(12, size=37, p = 1/11)",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "bc1b0d2834c99477bf0bb25d5fa20da23150f511"
+      },
+      "cell_type": "markdown",
+      "source": "On the kicking team,  the front line is responsible for the majority of concussions, but the gunners on the far edges of the field--roles GL and GR--were collectively involved in 9 concussion-related events either as the injured player or injury partner. This suggests the gunners are disproportionately likely to reach the receiver and make injury-causing tackles.\n\nThe punt receiver was the injury partner in 8 concussions, so incoming tacklers often hurt themselves as they hit the receiver. In total, punt receivers were involved in 13 of 37 or roughly 35% of punt play concussions. As only one of 22 players on the field, this high chance of concussion involvement of receivers is almost certainly not due to chance (See hidden code and output above.). This means the data strongly support the intuition that as the focal point of the return and a ball-carrier eligible to be tackled, the punt receiver is at the highest risk of being involved in concussion-causing events of any player on the field."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "d7da667584a6bfed05e1f1c53f81a4a08bfdd9df"
+      },
+      "cell_type": "markdown",
+      "source": "### Initial Data Analysis: Key Takeaways"
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "10d2e21ccee62f96108991c55ae3b24bfdf6950e"
+      },
+      "cell_type": "markdown",
+      "source": "1.  The kicking team is more likely to suffer concussions than the receiving team.\n2. Concussions are more likely to occur in the preseason than the regular season or postseason.\n3. The punt receiver is the most likely player to be involved in concussion-causing impacts."
+    },
+    {
+      "metadata": {
+        "_uuid": "b9c28ff9c49e640bf6636eaac0a46a865e13882f"
+      },
+      "cell_type": "markdown",
+      "source": "# NGS Data Exploration and Analysis"
+    },
+    {
+      "metadata": {
+        "_uuid": "6b80527ab8a522515ae8a247da57342e1ccb2444"
+      },
+      "cell_type": "markdown",
+      "source": "The Next Gen Stats punt data provides player positions and direction readings during all punt plays for 2016 and 2017 as well as the distance traveled since the previous time step. Readings were recorded once every tenth of a second."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "3eb09be94c699c33b1920a4d39a86253830f7ee7"
+      },
+      "cell_type": "code",
+      "source": "# List Next Gen Stats files\nfiles <- list.files(path = \"../input/NFL-Punt-Analytics-Competition\")\nngs_files <- files[files %>% startsWith(\"NGS\")]\n\n# Load in all ngs play data and filter out plays that did not result in injury\n# This may take a minute or two...\ninjury_ngs_data <- data.frame()\n\nfor (file in ngs_files){\n    print(paste(\"Now reading\", file, sep=\" \"))\n    f <- fread(paste(\"../input/NFL-Punt-Analytics-Competition/\", file, sep=\"\"))\n    f$game_play_id <- paste(f$GameKey, f$PlayID, sep=\"_\" )\n    f <- f %>% filter(game_play_id %in% injury_play_info[[\"game_play_id\"]])\n    if (nrow(injury_ngs_data) == 0 ){\n        injury_ngs_data <- f\n    } else{\n        injury_ngs_data <- rbind(injury_ngs_data, f)\n    }\n}\n\n# Select only variables of interest\ninjury_ngs_data <- injury_ngs_data %>% select(-Season_Year, -GameKey, -PlayID)\n\n# Convert date to numeric\ninjury_ngs_data$Time <- as.numeric(parse_date_time(injury_ngs_data$Time, \"ymd hmOS\"))\n\n# Set first recorded time per play to zero\ninjury_ngs_data <- injury_ngs_data %>% \n                   group_by(game_play_id) %>% \n                   mutate(play_time = Time - min(Time))\n\n# Add variables for player speed in meters per second and miles per hour\n# To get speed in yards per second, multiply dis (distance traveled  in 0.1 seconds) by 10\ninjury_ngs_data$speed_mps <- (injury_ngs_data$dis/1.0936) * 10 # Convert yards per 0.1 seconds to meters per second\ninjury_ngs_data$speed_mph <- (injury_ngs_data$speed_mps) * 2.23694 # Convert meters per second to miles per hour\nstr(injury_ngs_data)\n\n# Create data frame of injured player and primary partner data to join with NGS data\npartner_meta_data <- injury_play_info\npartner_meta_data$GSISID <- partner_meta_data$Primary_Partner_GSISID\nmeta_data_full <- rbind(injury_play_info, partner_meta_data)\nmeta_data_full$injury_role <- ifelse(meta_data_full$GSISID == meta_data_full$Primary_Partner_GSISID, \"Injury Partner\", \"Injured Player\")\n\ninjury_ngs_data_wide <- injury_ngs_data %>% \nleft_join(meta_data_full, by = c(\"GSISID\", \"game_play_id\"))\ninjury_ngs_data_wide$injury_role <- ifelse(is.na(injury_ngs_data_wide$injury_role), \n                                           \"Uninvolved Player\", injury_ngs_data_wide$injury_role)\n\n# Join in Role data and make Team labels to identify each player in NGS data\nextended_kick_roles <- c(kick_roles, \"GLi\", \"GLo\", \"GRi\", \"GRo\", \n                         \"PPLi\", \"PPLo\", \"PPri\", \"PPRo\", \"PPL\" )\n\npunt_roles <- player_role_data %>% \n              mutate(game_play_id = paste(GameKey,PlayID, sep = \"_\")) %>% \n              select(game_play_id, GSISID, Role) %>%\n              mutate(Team = ifelse(Role %in% extended_kick_roles, \"Kicking_Team\", \"Return_Team\"))\n\ninjury_ngs_data_wide <- injury_ngs_data_wide %>% left_join(punt_roles, by=c(\"game_play_id\", \"GSISID\"))",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "009bf326a4fe78f098252197d8424ccf49c19766"
+      },
+      "cell_type": "markdown",
+      "source": "First and foremost, it should be noted that the NGS data likely have significant measurement error for player position and distance traveled. After calculating player speed from distance traveled per 0.1 seconds, the data show that during concussion-causing plays, players traveled at roughly 3.77 miles per hour, on average, but the maximum speed recorded was 60.14 miles per hour. \n\nSince the fastest players in the NFL clock in at around 22 miles per hour,[$^{5}$](#ref5) this is clearly not an accurate measurement. Further exploration shows that most injury-causing plays contain maximum speeds beyond what is reasonably possible for an NFL player. Roughly 1 in 2000 records list speeds faster than 22 miles per hour; to correct this problem I will round all speed readings above 22.5 miles per hour down to 22.5 mph.\n\nWith that in mind, I will begin by plotting the maximum speeds achieved by injured players and injury partners during concussion-causing plays."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "b7ad76fb9072f33d1d90d72df6351b077f0d44fd",
+        "_kg_hide-input": true
+      },
+      "cell_type": "code",
+      "source": "# Cap speeds to 22.5 mph\ninjury_ngs_data_wide$speed_mph <- ifelse(injury_ngs_data_wide$speed_mph > 22.5, 22.5, \n                                         injury_ngs_data_wide$speed_mph)\n\n\n# Create density plot of max player speeds\np5 <- injury_ngs_data_wide %>% \n# filter(injury_role != \"Uninvolved Player\") %>%\ngroup_by(game_play_id, GSISID) %>%\nsummarize(Avg_Speed = mean(speed_mph), Max_Speed = max(speed_mph), Role = injury_role[1]) %>%\nggplot(aes(x=Max_Speed, fill = Role)) + \ngeom_density(color = \"black\", alpha = 0.5) + \nggtitle(\"Maximum Player Speed\") +\ntheme(legend.title=element_blank()) +\nscale_fill_manual(values = c(\"salmon\", \"skyblue\", \"gray70\")) +\nxlab(\"Maximum Speed (mph)\")\n\ngg5 <- ggplotly(p5)\n\nhtmlwidgets::saveWidget(gg5, \"gg5.html\")\n\ndisplay_html('<iframe src=\"gg5.html\" width=800 height=450 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "736b3ae50ef6ab1e2145a2f01f0b577cbadf85ab"
+      },
+      "cell_type": "markdown",
+      "source": "The plot shows that injured players tend to reach maximum speeds in the 16 to 22 mile per hour range, while injury partners tended to reach speeds bewteen 12 and 22 miles per hour. This shows that both parties involved in concussions often travel at speeds near the limit of what NFL players can achieve at some point during plays where concussions occur.\n\nThe bimodal density curve of players uninvolved in the injury divides players on punt plays into two general categories: those who tend to travel at slow speeds of 10 mile per hour or less and those who tend to travel at fast speeds of 13 miles per hour or more. Injured players were overwhelmingly likely travel at speeds that would put them in fast group, so high speeds are associated with an elevated the risk of concussion.\n\nTo get a better sense of how player speed and direction relate to injuries and when speeds are at their highest, I will generate an animated plot showing player position, speed and direction for the first play in the data set. In the interest of time and performance, I will limit the animation to one frame per second. Use the slider to adjust the time scale manually for quicker viewing. I will also embed the associated video below the animated plot. Click \"Output\" below to view the video. \n\n*Note: animations and video playback are not precisely synced.*"
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "a8b1480c738b36e9fc382fca5de4fb621e900684"
+      },
+      "cell_type": "code",
+      "source": "play_name <- names(video_footage[1])\n\n# Create list of players that exist at every time step (Many plays record more than 22 players)\nconsistent_players <- injury_ngs_data_wide %>%\n                        filter(game_play_id == play_name) %>% \n                        filter(play_time %% 1 == 0) %>% \n                        group_by(GSISID) %>% \n                        summarize(Count = n()) %>% \n                        filter(Count == max(Count))\n\n# Data set of injured player and his partner\nd1 <- injury_ngs_data_wide %>%\n            filter(game_play_id == play_name) %>% \n            filter(play_time %% 1 == 0) %>% filter(play_time < 30) %>% \n            filter(injury_role != \"Uninvolved Player\") %>% \n            arrange(play_time, GSISID)\n\n# Data set of other players involved in the play who are consistent across all time steps\nd2 <- injury_ngs_data_wide %>%\n            filter(game_play_id == play_name) %>% \n            filter(play_time %% 1 == 0) %>% filter(play_time < 30) %>% \n            filter(injury_role == \"Uninvolved Player\") %>% \n            filter(GSISID %in% consistent_players$GSISID) %>% \n            arrange(play_time, GSISID)\n\n# Create plot\np6 <- d1 %>%\n        ggplot(aes(x = x, y = y, color = injury_role, frame = play_time)) + \n        theme(panel.background = element_rect(fill = 'palegreen4'), panel.grid.major.y = element_blank()) +\n        geom_rect(xmin=-5, xmax=10, ymin=-3, ymax=56, color = NA, fill=\"steelblue\", alpha=0.8) + \n        geom_rect(xmin=110, xmax=125, ymin=-3, ymax=56, color = NA, fill=\"steelblue\", alpha=0.8) +  \n        geom_point(data = d2, alpha=0.75, size = 3, aes(color = Team)) +\n        geom_point(alpha=1, aes(label = speed_mph), size = 5) +\n        coord_cartesian(xlim = c(0,120), ylim = c(0, 53.3)) +\n        theme(legend.position=\"none\", axis.ticks.y=element_blank(), axis.ticks.x=element_blank(), \n              axis.text.y = element_blank(), axis.title.y=element_blank(), axis.title.x=element_blank()) + \n        xlab(\"Yard Line\") + \n        scale_x_discrete(limits=seq(0,120,10), labels=c(\"\", \"  G\",\"10\",\"20\", \"30\", \"40\", \"50\",\"40\",\"30\",\"20\",\"10\", \"G  \", \"\")) +\n        ggtitle(paste(\"Play \", play_name, \": \", d1[1,\"player_role\"], \"(\", d1[1,\"player_number\"], \")\",\n                      \" Injured by \", d1[1,\"partner_role\"], \" when \", d1[1,\"Player_Activity_Derived\"], sep=\"\")) + \n        scale_color_manual(values = c(\"salmon\", \"skyblue\",\"gray30\",\"gray80\")) +\ngeom_segment(aes(x=x, y=y, xend = x + sinpi(dir/180) * (speed_mph), yend = y + cospi(dir/180) * (speed_mph)), color=\"black\", alpha=0.5)\n\np6 <- p6 %>% animation_opts(frame = 50, transition = 10, easing = \"linear\", redraw = FALSE, mode = \"immediate\")\n\ngg6 <- ggplotly(p6)\nhtmlwidgets::saveWidget(gg6, \"gg6.html\")\ndisplay_html('<iframe src=\"gg6.html\" width=800 height=600 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "dc187901e6879ec67a965f2b045361155c04c6a0"
+      },
+      "cell_type": "code",
+      "source": "# Display associated video\ndisplay_html(paste('<div> <video width=\"800\" height=\"450\" controls=\"\" style=\"margin-left:0px; vertical-align: top\">\n<source src=\"', video_footage[play_name], '\" type=\"video/mp4\"></video>\n</div>', sep= \"\"))",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "fbc170b0ea9e37b83f056b0e41b795ab564114a2"
+      },
+      "cell_type": "markdown",
+      "source": "The animation shows that players involved in the concussion were traveling at approximately 15 miles per hour just prior to impact at a playtime of 22 seconds. The injured player experienced a deceleration from 15 miles per hour to 4.5 miles per hour in less than a second. \n\nHere is one more example:"
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "b61d7aabae6f90eca5cd8d66bad2ad4cf8beed35",
+        "scrolled": true
+      },
+      "cell_type": "code",
+      "source": "play_name <- names(video_footage[13])\n\n# Create list of players that exist at every time step (Many plays record more than 22 players)\nconsistent_players <- injury_ngs_data_wide %>%\n                        filter(game_play_id == play_name) %>% \n                        filter(play_time %% 1 == 0) %>%\n                        group_by(GSISID) %>% \n                        summarize(Count = n()) %>% \n                        filter(Count == max(Count))\n\n# Data set of injured player and his partner\nd1 <- injury_ngs_data_wide %>%\n            filter(game_play_id == play_name) %>% \n            filter(play_time %% 1 == 0) %>% filter(play_time < 30) %>%\n            filter(injury_role != \"Uninvolved Player\") %>% \n            arrange(play_time, GSISID)\n\n# Data set of other players involved in the play who are consistent across all time steps\nd2 <- injury_ngs_data_wide %>%\n            filter(game_play_id == play_name) %>% \n            filter(play_time %% 1 == 0) %>% filter(play_time < 30) %>%\n            filter(injury_role == \"Uninvolved Player\") %>% \n            filter(GSISID %in% consistent_players$GSISID) %>% \n            arrange(play_time, GSISID)\n\n# Create plot\np7 <- d1 %>%\n        ggplot(aes(x = x, y = y, color = injury_role, frame = play_time)) + \n        theme(panel.background = element_rect(fill = 'palegreen4'), panel.grid.major.y = element_blank()) +\n        geom_rect(xmin=-5, xmax=10, ymin=-3, ymax=56, color = NA, fill=\"steelblue\", alpha=0.8) + \n        geom_rect(xmin=110, xmax=125, ymin=-3, ymax=56, color = NA, fill=\"steelblue\", alpha=0.8) +  \n        geom_point(data = d2, alpha=0.75, size = 3, aes(color = Team)) +\n        geom_point(alpha=1, aes(label = speed_mph), size = 5) +\n        coord_cartesian(xlim = c(0,120), ylim = c(0, 53.3)) +\n        theme(legend.position=\"none\", axis.ticks.y=element_blank(), axis.ticks.x=element_blank(), \n              axis.text.y = element_blank(), axis.title.y=element_blank(), axis.title.x=element_blank()) + \n        xlab(\"Yard Line\") + \n        scale_x_discrete(limits=seq(0,120,10), labels=c(\"\", \"  G\",\"10\",\"20\", \"30\", \"40\", \"50\",\"40\",\"30\",\"20\",\"10\", \"G  \", \"\")) +\n        ggtitle(paste(\"Play \", play_name, \": \", d1[1,\"player_role\"], \"(\", d1[1,\"player_number\"], \")\",\n                      \" Injured by \", d1[1,\"partner_role\"], \" when \", d1[1,\"Player_Activity_Derived\"], sep=\"\")) + \n        scale_color_manual(values = c(\"salmon\", \"skyblue\",\"gray30\",\"gray80\")) +\ngeom_segment(aes(x=x, y=y, xend = x + sinpi(dir/180) * (speed_mph), yend = y + cospi(dir/180) * (speed_mph)), color=\"black\", alpha=0.5)\n\np7 <- p7 %>% animation_opts(frame = 50, transition = 10, easing = \"linear\", redraw = FALSE, mode = \"immediate\")\n\ngg7 <- ggplotly(p7)\nhtmlwidgets::saveWidget(gg7, \"gg7.html\")\ndisplay_html('<iframe src=\"gg7.html\" width=800 height=600 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "4747960abc9a128984b50e92b7a980d93f6f1859"
+      },
+      "cell_type": "code",
+      "source": "# Display associated video\ndisplay_html(paste('<div> <video width=\"800\" height=\"450\" controls=\"\" style=\"margin-left:0px; vertical-align: top\">\n<source src=\"', video_footage[play_name], '\" type=\"video/mp4\"></video>\n</div>', sep= \"\"))",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "6920e08c5a8953bbef1dc22dc7927f42d3b7cefe"
+      },
+      "cell_type": "markdown",
+      "source": "In the play above, the receiver is injured by the right gunner during the catch. The incoming tackler is traveling at 19 miles per hour just prior to contact at a play time of 9 seconds. It should be noted that while no fair catch was signaled, the tackler was called for an interference penalty since the receiver was not allowed to catch the ball before contact was made.\n\n*Note: I have provided code below to recreate the play animation for all other plays where an injury partner could be determined. This code is not run by default in the interest of brevity and performance.*"
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "_kg_hide-output": true,
+        "trusted": true,
+        "_uuid": "91c53780de65b56e2ec004092e0b0699f4463067"
+      },
+      "cell_type": "code",
+      "source": "# # Code to display all injury animations\n# # Uncomment this code to run\n\n# # Do not make plots for plays with NA partner\n# no_partner <- injury_play_info[which(is.na(injury_play_info$Primary_Partner_GSISID)),]$game_play_id\n# # Do not recreate the two plots already shown\n# no_partner <- c(no_partner, names(video_footage[1]), names(video_footage[13]))\n# play_names <- names(video_footage)[!(names(video_footage) %in% no_partner)]\n\n# # Create a play animation for every play in play_names\n\n# for (play_name in play_names) {\n\n# # Create list of players that exist at every time step (Many plays record more than 22 players)\n# consistent_players <- injury_ngs_data_wide %>%\n#                         filter(game_play_id == play_name) %>% \n#                         filter(play_time %% 1 == 0) %>%\n#                         group_by(GSISID) %>% \n#                         summarize(Count = n()) %>% \n#                         filter(Count == max(Count))\n\n# # Data set of injured player and his partner\n# d1 <- injury_ngs_data_wide %>%\n#             filter(game_play_id == play_name) %>% \n#             filter(play_time %% 1 == 0) %>% filter(play_time < 60) %>%\n#             filter(injury_role != \"Uninvolved Player\") %>% \n#             arrange(play_time, GSISID)\n\n# # Data set of other players invovled in the play who are consistent across all time steps\n# d2 <- injury_ngs_data_wide %>%\n#             filter(game_play_id == play_name) %>% \n#             filter(play_time %% 1 == 0) %>% filter(play_time < 60) %>%\n#             filter(injury_role == \"Uninvolved Player\") %>% \n#             filter(GSISID %in% consistent_players$GSISID) %>% \n#             arrange(play_time, GSISID)\n\n# # Create plot\n# p6 <- d1 %>%\n#         ggplot(aes(x = x, y = y, color = injury_role, frame = play_time)) + \n#         theme(panel.background = element_rect(fill = 'palegreen4'), panel.grid.major.y = element_blank()) +\n#         geom_rect(xmin=-5, xmax=10, ymin=-3, ymax=56, color = NA, fill=\"steelblue\", alpha=0.8) + \n#         geom_rect(xmin=110, xmax=125, ymin=-3, ymax=56, color = NA, fill=\"steelblue\", alpha=0.8) +  \n#         geom_point(data = d2, alpha=0.75, size = 3, aes(color = Team)) +\n#         geom_point(alpha=1, aes(label = speed_mph), size = 5) +\n#         coord_cartesian(xlim = c(0,120), ylim = c(0, 53.3)) +\n#         theme(legend.position=\"none\", axis.ticks.y=element_blank(), axis.ticks.x=element_blank(), \n#               axis.text.y = element_blank(), axis.title.y=element_blank(), axis.title.x=element_blank()) + \n#         xlab(\"Yard Line\") + \n#         scale_x_discrete(limits=seq(0,120,10), labels=c(\"\", \"  G\",\"10\",\"20\", \"30\", \"40\", \"50\",\"40\",\"30\",\"20\",\"10\", \"G  \", \"\")) +\n#         ggtitle(paste(\"Play \", play_name, \": \", d1[1,\"player_role\"], \"(\", d1[1,\"player_number\"], \")\",\n#                       \" Injured by \", d1[1,\"partner_role\"], \" when \", d1[1,\"Player_Activity_Derived\"], sep=\"\")) + \n#         scale_color_manual(values = c(\"salmon\", \"skyblue\",\"gray30\",\"gray80\")) +\n# geom_segment(aes(x=x, y=y, xend = x + sinpi(dir/180) * (speed_mph), yend = y + cospi(dir/180) * (speed_mph)), color=\"black\", alpha=0.5)\n\n# p6 <- p6 %>% animation_opts(frame = 50, transition = 10, easing = \"linear\", redraw = FALSE, mode = \"immediate\")\n\n# gg6 <- ggplotly(p6)\n# htmlwidgets::saveWidget(gg6, paste(play_name, \".html\", sep=\"\"))\n# display_html(paste('<iframe src=\"', play_name, '.html\" width=800 height=600 frameborder=\"0\"></iframe>', sep=\"\"))\n    \n# }",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "50a4df440977ae3440de864b86d4751937cc9c32"
+      },
+      "cell_type": "markdown",
+      "source": "Recreating the animation for other injury-causing plays reveals a consistent pattern: in most plays, just prior to impact, at least one of the two players involved in the concussion is traveling at a speed of 15 miles per hour or faster. \n\nTo investigate further, I will generate a plot of the maximum speeds achieved by injured players and injury partners when they are in close proximity to one another to get a sense of speeds surrounding injury-causing events. I will define close proximity as a distance of two yards or less."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "2fba74d10b1fc9ab7274f9149960a85805731ff0",
+        "_kg_hide-input": true
+      },
+      "cell_type": "code",
+      "source": "# Create data frame with speed of players while at close proximity\nimpact_speed <- injury_ngs_data_wide %>% \nfilter(!is.na(Primary_Partner_GSISID)) %>% \n#filter(game_play_id == \"21_2587\") %>% \narrange(game_play_id, play_time) %>% \ngroup_by(game_play_id, play_time) %>% \nmutate(Proximity = sqrt((x[1]-x[2])^2 + (y[1]-y[2])^2),\n        Close_proximity = Proximity <= 2 ) %>% \n        filter(Close_proximity == TRUE) %>%\n        group_by(game_play_id) %>%\n        summarize(Max_injured_speed = max(speed_mph[injury_role==\"Injured Player\"]),\n                  Max_partner_speed = max(speed_mph[injury_role!=\"Injured Player\"]),\n                  Collision_Speed = ifelse(Max_injured_speed >= 15 | Max_partner_speed >=15, \"Fast\",\n                        ifelse(Max_injured_speed >= 10 | Max_partner_speed >=10, \"Moderate\", \"Slow\"))) %>% \n        ungroup()\n\n# Create scatterplot of injured player speed and injury partner speed\np8 <- impact_speed %>%\nggplot(aes(x = Max_injured_speed, y = Max_partner_speed)) + \ngeom_rect(xmin=0, xmax=10, ymin=0, ymax=10, fill=\"palegreen3\", alpha=0.25) +\ngeom_rect(xmin=10, xmax=14.95, ymin=0, ymax=15, fill=\"yellow\", alpha=0.25) +\ngeom_rect(xmin=0, xmax=10, ymin=10, ymax=15, fill=\"yellow\", alpha=0.25) +\ngeom_rect(xmin=15, xmax=22.5, ymin=0, ymax=22.5, fill=\"red\", alpha=0.2) +\ngeom_rect(xmin=0, xmax=14.95, ymin=15, ymax=22.5, fill=\"red\", alpha=0.2) +\ngeom_point(aes(label=game_play_id, color = Collision_Speed), size=2, alpha=0.9) + \nscale_color_manual(values = c(\"tomato4\", \"tomato1\", \"steelblue\")) +\ntheme(legend.position=\"none\") + xlim(0,21) + ylim(0,21) +\n# annotate(geom=\"text\", x = 3, y = 21, label = \"High Speed Impacts\", size=3) +\n# annotate(geom=\"text\", x = 3, y = 1, label = \"Low Speed Impacts\", size=3) +\n# annotate(geom=\"text\", x = 3, y = 11, label = \"Medium Speed Impacts\", size=3) +\nxlab(\"Maximum Injured Player Speed (mph)\") + ylab(\"Maximum Injury Partner Speed (mph)\") +\nggtitle(\"Maximum Player Speeds During Injury-Causing Events\")\n\ngg8 <- ggplotly(p8) \n\n\nhtmlwidgets::saveWidget(gg8, \"gg8.html\")\n\ndisplay_html('<iframe src=\"gg8.html\" width=650 height=550 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "d0bfbb491280cbc59e8620d71cbd8d87ad63ba14"
+      },
+      "cell_type": "markdown",
+      "source": "The plot above shows that over half (18 of 33) of concussion-causing plays where an injury partner could be determined involved at least one player traveling at a speed of 15 miles per hour or faster when players were within two yards of one another. Ten injuries involved moderate speeds with at least one player traveling between 10 and 15 per hour and only 5 injuries occurred at low speed with neither player traveling faster than 10 miles per hour.\n\nAs seen in the second injury play animation shown earlier, fast-moving tacklers can potentially reach the receiver before he catches the ball. This can result in situations where the receiver has little or no time to react to an incoming tackle. To illustrate this point, I will create a plot of punt hang time and punt distance on injury-causing plays, as well as a line that highlights how far a fast tackler traveling at 10 yards per second would be able to travel while the ball is in the air. This will provide a sense of how close tacklers could potentially get to receivers before the catch."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "f08306c40c19df7114d009e367789114d47c19a3",
+        "_kg_hide-input": true
+      },
+      "cell_type": "code",
+      "source": "# Create data frame of hang time and potential travel distance of gunners\nhang_time_frame <- injury_ngs_data_wide %>% \nfilter((Event == \"punt\") | (Event == \"punt_received\")) %>%\narrange(game_play_id, Event) %>% \ngroup_by(game_play_id) %>% \nfilter((\"punt\" %in% Event) & (\"punt_received\" %in% Event)) %>%\nsummarize(Punt_Hang_Time = max(Time) - min(Time), \n          Punt_Distance = max(punt_distance[!is.na(punt_distance)])) %>% \n          mutate(Gunner_Est_Dist_To_Reciever = round(Punt_Distance-(Punt_Hang_Time*10)),\n                 Gunner_Distance_Description = ifelse(Gunner_Est_Dist_To_Reciever <= 0, \n                                                     \"Reciever \\nReached\",\n                                                     ifelse(Gunner_Est_Dist_To_Reciever <= 10,\n                                                     \"Gunner Within \\n10 Yards\",\n                                                     \"Gunner Outside \\n10 Yards\")))\n\np10 <- hang_time_frame %>%\nggplot() +\ngeom_ribbon(data=data.frame(x=c(3,5.8), y= c(30,58)) , aes(x=x, ymin=30, ymax=y), fill=\"red\", alpha=0.25) +\ngeom_ribbon(data=data.frame(x=c(3,5.8), y= c(40,68)) , aes(x=x, ymin=c(30,58), ymax=y), fill=\"yellow\", alpha=0.25) +\ngeom_ribbon(data=data.frame(x=c(3,5.8), y= c(68,68)) , aes(x=x, ymin=c(40,68), ymax=y), fill=\"palegreen3\", alpha=0.2) +\ngeom_point(size=2, aes(x = Punt_Hang_Time, y = Punt_Distance, label = Gunner_Est_Dist_To_Reciever, color=Gunner_Distance_Description)) + \nxlim(2.9,5.8) + \ngeom_abline(yintercept = 0, slope = 10, label=\"Gunner_Distance_To_Reciever\") +\nscale_color_manual(values = c(\"steelblue\", \"tomato1\", \"tomato4\")) +\nxlab(\"Punt Hang Time (Seconds)\") +\nylab(\"Punt Distance (yards)\") + \nggtitle(\"Punt Distance by Hang Time\") + \nlabs(color=\"Estimated Distance of \\nGunner To Reciever\", textsize=1) +\nannotate(geom = \"text\", x = 3.15, y = 36.25, label=\"Distance Traveled at\\n10 yards per second\", size = 3) +\ngeom_segment(x=3.1, y=35, xend=3.195, yend=32.3,size=0.25, arrow=arrow()) +\ntheme(legend.title=element_text(size=10))\n\ngg10 <- ggplotly(p10) \nhtmlwidgets::saveWidget(gg10, \"gg10.html\")\ndisplay_html('<iframe src=\"gg10.html\" width=800 height=550 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "0dd9d02b77051685c30fc6c88ac9277e340fa9d9"
+      },
+      "cell_type": "markdown",
+      "source": "The plot shows that in 8 of the 28 concussion-causing plays where the ball was tracked as being punted and received, a fast gunner could have reached the receiver while the ball was in the air. In an additional 16 plays, a fast tackler could have come within 10 yards of the receiver.\n\nI will investigate this point further by creating a histogram of the actual distances of the closest coverage player to the punt receiver at the time of the catch."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "ffa1fbebc0dd4001c81f20b5b9d307661a114dc3"
+      },
+      "cell_type": "code",
+      "source": "# Create data frame with distance of closest tackler upon reception\ndefender_dist_frame <- injury_ngs_data_wide %>% \nfilter((Event == \"punt_received\")) %>% \nselect(GSISID, Time, x, y, dis, game_play_id, Role, Team) %>%\ngroup_by(game_play_id) %>% \nmutate(PR_x = x[which(Role==\"PR\")]) %>% \nmutate(PR_y = y[which(Role==\"PR\")]) %>%  \nfilter(Team == \"Kicking_Team\") %>% \narrange(game_play_id, Role) %>% \nmutate(dist_to_reciever = sqrt((PR_x-x)^2 + (PR_y-y)^2),\n      x_dist_to_reciever = abs(PR_x-x)) %>%\nsummarize(Closest_tackler_dist = min(dist_to_reciever),\n          Closest_tackler_x_dist = min(x_dist_to_reciever),\n          Distance_Zone = ifelse(Closest_tackler_x_dist <= 5, \"Within 5 Yards\",\n                          ifelse(Closest_tackler_x_dist <= 10, \"Within 10 Yards\", \"Outside 10 yards\")))\n\ndefender_dist_frame <- hang_time_frame %>% \n                        left_join(defender_dist_frame, by=c(\"game_play_id\")) %>% \n                        mutate(Punt_Speed = Punt_Distance/Punt_Hang_Time)\n\n# Generate histogram of proximity of closest tackler with a density curve\np12 <- defender_dist_frame %>%\nggplot(aes(x=Closest_tackler_dist)) + \ngeom_histogram(position=\"dodge\", binwidth=1, alpha=0.6, fill=\"salmon\") +\nxlab(\"Closest Defender Proximity (yards)\") + \ngeom_density(aes(y=1.5*..count..), color=\"tomato4\") +\nylab(\"Injury Count\") + \ntheme(legend.position = \"none\") + xlim(-2.5, 27) +\nggtitle(\"Closest Tackler Distance Upon Reception\") \n       \ngg12 <- ggplotly(p12) \nhtmlwidgets::saveWidget(gg12, \"gg12.html\")\ndisplay_html('<iframe src=\"gg12.html\" width=800 height=550 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "f79d645f5f3a1fc1df8e6ef5310c400ce8746a29"
+      },
+      "cell_type": "markdown",
+      "source": "The plot above shows that in 16 of 30 injury-causing plays with a recorded punt reception, the closest defender was within 10 yards of the receiver at the time of the catch. This means that in about half of concussion-causing plays, the receiver would have a second or less to respond to an incoming tackler running at 10 yards per second.\n\nThe previous plot shows the actual distance of closest defenders to receivers at the time of the catch in terms of straight line, Euclidean distance, but in football, rules are often framed in terms of yard lines: distances along the x-axis of the field. As such, I will create a second plot showing the yard line distance (x-axis distance) of the closest defender at the time of the catch. I will plot the yard line distance by the speed of the punt, to get a sense of how punt speed (punt distance divided by hang time) is related to the proximity of the closest defender."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "87d2bbebd9154577d3535c272398d91b2661c9d7",
+        "_kg_hide-input": true
+      },
+      "cell_type": "code",
+      "source": "p11<- defender_dist_frame %>%\nggplot(aes(x = Closest_tackler_x_dist, y = Punt_Speed)) +\ngeom_rect(xmin=10, xmax=21, ymin=8, ymax=15, fill=\"palegreen3\", alpha=0.25) +\ngeom_rect(xmin=5, xmax=10, ymin=8, ymax=15, fill=\"yellow\", alpha=0.25) +\ngeom_rect(xmin=0, xmax=5, ymin=8, ymax=15, fill=\"red\", alpha=0.2) +\ngeom_point(size=2, alpha = 1, aes(color=Distance_Zone)) + \nscale_color_manual(values = c(\"steelblue\", \"tomato1\", \"tomato4\")) +\nylim(8,14.25) +\nggtitle(\"Closest Tackler Distance at the Time of Catch by Punt Speed\") + \ntheme(legend.position = \"none\") +\nxlab(\"Closest Tackler Yard Line Distance to Reciever\") +\nylab(\"Punt Speed (yards/sec)\")\n\ngg11 <- ggplotly(p11) \nhtmlwidgets::saveWidget(gg11, \"gg11.html\")\ndisplay_html('<iframe src=\"gg11.html\" width=800 height=550 frameborder=\"0\"></iframe>')\n\n# Check correlation of Punt speed to closest defender distance = 0.54695\n# cor(defender_dist_frame$Punt_Speed, defender_dist_frame$Closest_tackler_x_dist)",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "0c436c2b04c67fc804b831d3bfad2db73adc73a4"
+      },
+      "cell_type": "markdown",
+      "source": "The plot shows that in 8 of 30 plays with a reception, a tackler was within 5 yard lines of the receiver and in 18 of 30 plays, a tackler was within 10 yard lines. The moderate positive correlation seen in the graph shows that tacklers tend to get closer to receivers during slow punts. Every punt with a speed of 10 yards per second or less allowed a defender to get within 10 yard lines of the receiver by the time the ball was caught.\n\nThe preceding plots show that punts create the conditions for high speed collisions between receivers, tacklers and blockers, where the receiver tends to have little time to react to fast-moving tacklers. To get a sense of the effect these high speed collisions have on players, I will conclude my analysis by plotting the maximum magnitude of acceleration (greatest change in speed) experienced by concussed players and their injury partners when they are in close proximity to one another."
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "c39482dbbe8d446d4d8ff5f0327569a7bf8608a8",
+        "scrolled": true
+      },
+      "cell_type": "code",
+      "source": "# Calculates acceleration as the total magnitude of speed changes in the x and y directions\naccel2 <- function(x, y){\n    x_speeds <- (x - c(0,x))[1:length(x)] * 10/1.0936 * 2.23694 # Convert to mph\n    y_speeds <- (y - c(0,y))[1:length(y)] * 10/1.0936 * 2.23694 # Convert to mph\n    \n    x_accels <- (x_speeds - c(0,x_speeds))[1:length(x)]\n    y_accels <- (y_speeds - c(0,y_speeds))[1:length(x)]\n    \n    total_accels <- sqrt(x_accels^2 + y_accels^2) * 10 # Convert from 0.1 seconds to 1 second\n    total_accels <- ifelse(total_accels > 60, 60, total_accels) # Cap max accel magnitude to 60 mph/s\n    # Readings greater than 60 mph/s may be a result of position measurement innacuracy\n\n    return( total_accels )\n}\n\n# Prepare data frame with acceleration\nimpact_decel <- injury_ngs_data_wide %>% \nfilter(!is.na(Primary_Partner_GSISID)) %>% \narrange(game_play_id, play_time, injury_role) %>% \ngroup_by(game_play_id, GSISID) %>% \nmutate(acceleration = accel2(x, y)) %>% \ngroup_by(game_play_id, play_time) %>%\nmutate(Proximity = sqrt((x[1]-x[2])^2 + (y[1]-y[2])^2),\n        Close_proximity = Proximity < 2 ) %>% \n        filter(Close_proximity == TRUE) %>%\n        group_by(game_play_id) %>%\n        summarize(Injured_player = max(na.omit(acceleration[injury_role==\"Injured Player\"])),\n                  Injury_partner = max(na.omit(acceleration[injury_role!=\"Injured Player\"]))) %>%\n        gather(key=\"Player_Role\", value=\"Max_Accel\", -game_play_id)\n\n# Create plot\np9 <- impact_decel %>%\nggplot(aes(x=Max_Accel)) + \ngeom_density(aes(y=4.5 * ..count.., color= Player_Role)) +\ngeom_histogram(aes(fill=Player_Role), position=\"dodge\", binwidth=5, alpha=0.8) +\nxlab(\"Maximum Magnitude of Acceleration (mph/s)\") + \nylab(\"Injury Count\") + theme(legend.position = \"none\") +\nggtitle(\"Maximum Acceleration Experienced During Injury-Causing Events\") + xlim(0,65) + \ntheme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank()) +\nscale_y_continuous( labels=c(0,2,4,6,8) ) +\nscale_color_manual(values = c(\"tomato3\", \"steelblue\")) +\nscale_fill_manual(values = c(\"salmon\", \"skyblue\")) +\nfacet_wrap(~Player_Role)\n\n\ngg9 <- ggplotly(p9) \n\nhtmlwidgets::saveWidget(gg9, \"gg9.html\")\n\ndisplay_html('<iframe src=\"gg9.html\" width=800 height=550 frameborder=\"0\"></iframe>')",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "e41a846a47fa2c3cf6239ea6bb4b8710a60028a6"
+      },
+      "cell_type": "markdown",
+      "source": "The plot shows that most injured players experienced changes in speed of 20 miles per hour per second or more, while within two yards of their injury partners. Fourteen injured players experienced acceleration with a magnitude of 35 miles per hour per second or more. For context, imagine cruising down the road at 35 miles per hour and coming to a complete stop in the span of a second. This would constitute an violent, abrupt stop that would engage a seat-belt and likely hurt the occupants. In a car, however, the seat-belt distributes the force across the body. In concussion-causing plays, the brunt of the force is often concentrated in the upper torso and helmet. \n\nInjury partners also tended to experience rapid speed changes while close to the players they hurt, although fewer experienced speed changes of 35 miles per hour per second or more. Cases where speed changes of 60 miles per hour per second or more were recorded could be a result of measurement error in the next gen stats data. Still, this paints a clear picture: collisions are happening at high speeds causing both players involved to experience forces that could lead to concussions. \n\nBased on the preceding analysis, I believe the most promising way to reduce concussions on punts, without reducing the number of punt plays or punt returns, is to introduce rules that give the receiver adequate time to catch the ball safely without facing an immediate tackle attempt and to generally reduce the speed at which tacklers contact blockers and the receiver."
+    },
+    {
+      "metadata": {
+        "_uuid": "917b4f0e4c3b3aa8fc0ebc2901e50a645a7b4643"
+      },
+      "cell_type": "markdown",
+      "source": "### NGS Analysis Key Takeaways"
+    },
+    {
+      "metadata": {
+        "_uuid": "81b7c2c43e1e766583796f5f12897519354ffd61"
+      },
+      "cell_type": "markdown",
+      "source": "1. Injured players and their partners often reach speeds near the limits of what NFL players are capable of prior to injury.\n2. Coverage players often get within 10 yards of the receiver by the time he catches the football.\n3. Injured players tend to experience violent changes in speed when they are in close proximity to injury partners."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "c887d73202c8e3e7d35f8a09d457985d27fd76b0"
+      },
+      "cell_type": "markdown",
+      "source": "# Rule Change Philosophy"
+    },
+    {
+      "metadata": {
+        "_uuid": "c00c9c829d4f99bb1bcd62b91082c77cd2725108"
+      },
+      "cell_type": "markdown",
+      "source": "Based on the preceding video review, data analysis and my knowledge of football, as I see it, there are three ways to potentially reduce punt play concussions:\n\n1. Reduce the number of punt plays.\n2. Reduce the likelihood of punt returns and/or increase the likelihood of fair catches.\n3. Improve player safety during the catch and return, such as by reducing player speed.\n\nI will take a moment to assess the merits and drawbacks of each of these three general strategies before making my rule change prescriptions.\n\nReducing the number of punt plays is perhaps the most sure-fire way to reduce punt play injuries. If you don't have as many punts, you will tend to have fewer total injuries on punt plays.\n\nOn the down side, reducing the number of punt plays does nothing to address the likelihood of a concussion occurring during any particular punt play. In addition, extreme solutions like getting rid of punting entirely would greatly disrupt the flow and balance of play, harming the integrity of the game. Therefore, reducing the number of punt plays should not be the focus of the rule changes.\n\nReducing the likelihood that a player attempts a return on a punt play or conversely increasing the likelihood of a fair catch is a way to reduce the expected number of injuries on punts without changing the total number of punts that occur. This is a more promising route for addressing the problem than reducing the absolute number of punt plays, since it would actually reduce the chances of an injury occurring on any given punt play.\n\nThe main downside of disincentivizing punt returns is that fewer returns means there would be fewer exciting run backs for the fans to enjoy. Avoiding returns also doesn't do anything to address the safety of players in plays where returns actually occur. There would be fewer returns, but the returns that do happen would be just as dangerous.\n\nThe final strategy--improving player safety during the return--is the ideal goal for reducing injuries. If players could be made safer during punt plays, reducing the number of punts or punt returns would not be necessary. Unfortunately, rules aimed at improving player safety are not likely to be as effective as avoiding problem plays entirely. Even if you could introduce a \"speed limit\" forcing all players to run 15 miles per hour or less, injuries would still occur on occasion.\n\nNonetheless, I believe enhancing player safety should be the main focus of rule changes aimed at reducing punt play concussions. Just because an ideal is difficult to achieve, it does not mean it is not worth striving toward.  Therefore, my primary goal is to propose rule changes that will promote player safety without significantly reducing the number punt plays or punt returns.\n\nIf reducing the number of punt returns is ultimately deemed necessary, the league could use the preseason as a test bed for more extreme rule changes. The league could even maintain a different rule set for the preseason and regular season to eliminate the roughly 32 percent of punt play concussions that occur during the preseason without affecting the regular or post seasons."
+    },
+    {
+      "metadata": {
+        "_uuid": "df9dcca74fa65c95e553c09cf0f8c70dccb6c0cb"
+      },
+      "cell_type": "markdown",
+      "source": "# Rule Change Proposals"
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "3a22e1c42b203008123b0ff5b3f8254fb3bffe42"
+      },
+      "cell_type": "markdown",
+      "source": "\n### 1. Dedicated Return Blocker \n\n<br>\nExploration of the data reveals that punt receivers and the left and right gunners on the kicking team are involved in a disproportionate number of concussions. Review of the videos and NGS play animation plots reveals that tackle attempts are often made on receivers at high speed during or immediately after the catch.\n\nMy first rule proposal is to require the return team to have a “Dedicated Return Blocker” line up within 10 yards of the punt receiver on plays where the return team intends to return the punt. Requiring a Dedicated Return Blocker will ensure that the return team always has a man in position to impede the advance of the fastest gunners on the kicking team. This rule is designed both to slow down the speed at which first contact is made with the receiver as well as provide a basis for the second rule proposal.\n\nIn the event of a short kick, the Dedicated Return Blocker may signal for a fair catch and receive the ball (or let the ball hit the ground), but he may not return the kick. The return team may elect not to have a Dedicated Return Blocker, in which case the receiver may not return the ball and instead must make a fair catch or let the ball hit the ground. On a punt without a Dedicated Return Blocker, all return team players other than the receiver must line up within 10 yards of the line of scrimmage to clearly indicate that there is no Dedicated Return Blocker. These options are not intended to increase the rate of fair catches, but rather to give the return team more options as to how they wish to approach the play.\n\n<br>\n\n### 2. Return Safe Zone  \n\n<br>\n\nA single Dedicated Return Blocker may be able to slow the advance of the fastest coverage player, but a Dedicated Return Blocker is insufficient to create the sort of overall speed reduction that would be necessary to improve player safety on punt plays. Therefore, a broader rule that affects all incoming coverage players is necessary.\n\nMy second rule proposal is to introduce a “Return Safe Zone” between the receiver and the Dedicated Return Blocker. If the coverage team enters the Return Safe Zone or contacts the Dedicated Return Blocker before the receiver catches the punt or the ball touches the ground, it will be charged with a 15 yard interference penalty, assessed from the spot of the return, fair catch or downed ball. After the punt is caught or touches the ground, play proceeds as it normally would without a Return Safe Zone.\n\nThe figure below illustrates the Return Safe Zone and Dedicated Return Blocker in the context of existing punt roles:"
+    },
+    {
+      "metadata": {
+        "_kg_hide-input": true,
+        "trusted": true,
+        "_uuid": "273fc91b952170506e66bf3f88c82b902b18a89f"
+      },
+      "cell_type": "code",
+      "source": "# Role list\nrecieve_roles <- c(\"VR\", \"VL\", \"PDR1\",\"PDR2\",\"PDR3\",\n                   \"PDL1\",\"PDL2\",\"PDL3\", \"PLM\", \"Dedicated\\nReturn\\nBlocker\",\"Punt\\nReceiver\")\n\n# Create data frame of x,y positions for each punt role\nrecieve_x <- c(55, 55, 54, 54, 54, 54, 54, 54, 61, 75, 85) + 11\nrecieve_y <- c(50, 2, 36, 32, 28, 16, 20, 24, 25, 28, 27)\n\n\nrole_position_data <- data.frame(\"Role\" = recieve_roles, x = recieve_x, y= recieve_y)\n\n# Use contructed dataframe to create plot of pole labels on a football field\nggplot(role_position_data, aes(x = x, y = y)) + \n            geom_rect(xmin=86,xmax=96,ymin=-2.7, ymax=56, fill=\"tomato2\", alpha=0.15, color=\"black\", linetype = 2, size=0.25) +\n            geom_label(aes(label=Role), fill= \"skyblue\", size = 3) + \n            theme(panel.background = element_rect(fill = 'palegreen4')) +\n            coord_cartesian(xlim = c(59,111), ylim = c(0, 53.3)) + \n            theme(legend.position=\"none\", axis.ticks.y=element_blank(), axis.ticks.x=element_blank(), \n            axis.text.y = element_blank(), axis.title.y=element_blank(), axis.title.x=element_blank(),\n            plot.title = element_text(hjust = 0.5, size=14)) +\n            scale_x_discrete(limits=seq(0,120,10), labels=c(\"\", \"  G\",\"10\",\"20\", \"30\", \"40\", \"50\",\"40\",\"30\",\"20\",\"10\", \"G  \", \"\")) +\n            annotate(geom=\"text\", x = 91, y = 29, label = \"S\\nA\\nF\\nE\\n \\nZ\\nO\\nN\\nE\", size=5) +\n            annotate(geom=\"text\", x = 91, y = 2, label = \"Max Width \\n10 Yards\", size=3) +\n            geom_rect(xmin=110, xmax=125, ymin=-2.7, ymax=56, color = NA, fill=\"steelblue\", alpha=0.5) + \n            geom_segment(x = 86, y = 2, xend=96, yend=2, size = 0.25, linetype = 3, arrow = arrow()) + \n            geom_segment(x = 96, y = 2, xend=86, yend=2, size = 0.25, linetype = 3, arrow = arrow()) + \n            scale_y_continuous(breaks = NULL) + ggtitle(\"Return Safe Zone Details\")",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "_uuid": "c2df2bc24d1c94263367d2e12e0c58121cff2cd2"
+      },
+      "cell_type": "markdown",
+      "source": "If a player on the punt coverage team reaches the Return Safe Zone while the Dedicated Return Blocker is more than 10 yards from the receiver, the play will be whistled dead and the return team will be charged with a 5 yard illegal formation penalty from the spot of the catch. A coverage player is considered to have reached the Return Safe Zone if he comes within two yard lines of it. This means that the Dedicated Return Blocker must strive to remain within 10 yards of the receiver to create a Return Safe Zone with a width of 10 yards or less, since allowing the Return Safe Zone to become wider than 10 yards risks a penalty.\n\nDefining the Return Safe Zone as the area between the receiver and Dedicated Return Blocker provides a clear reference point for players, officials and fans to judge whether coverage players have violated the safe zone. It should be much easier for coverage players to judge whether they have bypassed the Dedicated Return Blocker too early than it would be for them to judge whether they have come within an arbitrary distance of the receiver, such as 5 or 10 yards, in the heat of the moment.\n\nThe establishment of a Return Safe Zone will prevent the problem of receivers being hit during or immediately after catching punts. It will also serve to slow the overall speed of the incoming coverage players and give the receiving team blockers more time to get into position, improving player safety. My earlier analysis showed that in 18 of 30 plays with a recorded punt reception, a coverage player was within 10 yard lines of the receiver at the time of the catch. This means the Punt Safe Zone would have forced incoming tacklers to slow down on about half of injury-causing plays. It is likely that the Return Safe Zone would also cause defenders who come within 10 to 15 yard lines of the receiver to slow down a bit as well, to avoid the possibility of violating the Return Safe Zone before the catch.\n\n<br>\n\n### 3. Fair Catch Compensation \n\n<br>\n\nThe first two rules are designed to promote player safety during punt returns, but they could lead to an unintended consequence: fewer fair catches. The establishment of a Return Safe Zone means receivers will typically have plenty of time to make a catch safely and gain at least a few yards on the return, reducing the incentive to make a fair catch.\n\nMy third rule proposal is to introduce “Fair Catch Compensation” to counterbalance the likely increase in average return yardage resulting from the establishment of the Return Safe Zone. Fair Catch Compensation will grant the receiving team a 5 yard bonus when making a fair catch from the spot of the catch. \n\nThe amount of Fair Catch Compensation could be increased if a 5 yard bonus does not provide adequate incentive for players to make fair catches at rates similar to the current rates.\n \n <br>\n \n ### Expectations and Considerations\n \n <br>\n \nCreating rules to provide a Dedicated Return Blocker and Return Safe Zone will promote player safety by reducing player speeds and giving the receiver adequate time to safely catch the ball and react to incoming tacklers. Providing Fair Catch Compensation will allow for the creation of the Return Safe Zone without drastically reducing fair catches. \n\nThe rule changes I propose will, in general, make punts somewhat less effective for the kicking team, since the receiving team is expected to gain more yardage on the return and 5 extra yards on fair catches. This could result in more fourth down conversion attempts and fewer punt plays. This is not the intent of the proposed rule changes and I believe the advantage to the receiving team would not be so significant as to greatly reduce the number of punts or disrupt the normal strategy of the game.\n\nThe presence of a Dedicated Return Blocker may shift some of the danger of concussion from the receiver to the Dedicated Return Blocker. Since the Dedicated Return Blocker is not eligible to return the ball, however, the coverage team cannot tackle him and has no incentive to make contact with him. The Return Safe Zone also forces the defense to wait to touch or bypass the Dedicated Return Blocker until the punt lands, which means the fastest coverage players will typically have to slow down before any contact with the Dedicated Return Blocker occurs. Overall, the Dedicated Return Blocker may face a higher risk of being involved in concussions than the average player on the field, but his presence along with the Return Safe Zone will reduce the total incidence of high speed collisions and concussions."
+    },
+    {
+      "metadata": {
+        "_uuid": "f5b0772cebea81314b278937c2805100518d2d0b"
+      },
+      "cell_type": "markdown",
+      "source": "# Final Thoughts"
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "ecc08d12d1ef8ea8402168563f47374e239508d7"
+      },
+      "cell_type": "markdown",
+      "source": "Reducing concussions on punt plays is a difficult problem without a perfect solution. The physical nature of football carries some irreducible risk of injury, no matter how players are constrained by the rules. Avoiding problem plays like punts and kickoffs by drastically reducing returns or eliminating them altogether is perhaps the only certain way to greatly reduce injuries, but I believe it is best to take a measured approach and try to improve player safety during the course of play."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "_uuid": "bf1ac8fdb6702cdeb94535d1a4a4faef8237dc87"
+      },
+      "cell_type": "markdown",
+      "source": "## References"
+    },
+    {
+      "metadata": {
+        "_uuid": "2cadeb963adb794db890b76ddb2725835b575ce2"
+      },
+      "cell_type": "markdown",
+      "source": "1. https://www.nielsen.com/us/en/insights/news/2017/super-bowl-li-draws-111-3-million-tv-viewers-190-8-million-social-media-interactions.html <a id=\"ref1\"></a>\n\n2. http://www.espn.com/nfl/story/_/id/22226487/nfl-concussions-rise-highest-level-league-began-sharing-data <a id=\"ref2\"></a>\n\n3. http://www.espn.com/nfl/statistics/team/_/stat/punting/year/2016 <a id=\"ref3\"></a>\n\n4. http://www.espn.com/nfl/statistics/team/_/stat/punting/year/2017 <a id=\"ref4\"></a>\n\n5. https://nextgenstats.nfl.com/stats/top-plays/fastest-ball-carriers <a id=\"ref5\"></a>"
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "display_name": "R",
+      "language": "R",
+      "name": "ir"
+    },
+    "language_info": {
+      "mimetype": "text/x-r-source",
+      "name": "R",
+      "pygments_lexer": "r",
+      "version": "3.4.2",
+      "file_extension": ".r",
+      "codemirror_mode": "r"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 1
+}
